@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>QR File Transfer</title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1b1f24;--muted:#5f6b7a;--line:#dde1e6;--accent:#1f6feb;--ok:#1a7f37;--ng:#cf222e;--warn:#9a6700}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0e1116;--card:#161b22;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--accent:#4493f8;--ok:#3fb950;--ng:#f85149;--warn:#d29922}}
+:root[data-theme="dark"]{--bg:#0e1116;--card:#161b22;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--accent:#4493f8;--ok:#3fb950;--ng:#f85149;--warn:#d29922}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}
+header{display:flex;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--card);position:sticky;top:0;z-index:5}
+header h1{font-size:16px;margin:0 auto 0 0;align-self:center}
+.tab{border:1px solid var(--line);background:transparent;color:var(--fg);padding:6px 14px;border-radius:8px;font:inherit}
+.tab.on{background:var(--accent);border-color:var(--accent);color:#fff}
+main{max-width:720px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px}
+label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+select,input[type=file]{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
+.row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+button.btn{font:inherit;padding:10px 16px;border-radius:8px;border:none;background:var(--accent);color:#fff;width:100%;margin-top:12px}
+button.btn.sub{background:transparent;color:var(--fg);border:1px solid var(--line)}
+button.btn:disabled{opacity:.4}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:14px;margin-top:8px}
+.stats b{font-variant-numeric:tabular-nums}
+.muted{color:var(--muted);font-size:13px}
+.bar{height:10px;background:var(--line);border-radius:5px;overflow:hidden;margin-top:10px}
+.bar>i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+video{width:100%;border-radius:10px;background:#000;display:block}
+#stage{position:fixed;inset:0;background:#fff;display:none;align-items:center;justify-content:center;flex-direction:column;z-index:20}
+#stage canvas{image-rendering:pixelated}
+#stageInfo{color:#333;font:13px system-ui;margin-top:6px;font-variant-numeric:tabular-nums}
+.ok{color:var(--ok)}.ng{color:var(--ng)}.warn{color:var(--warn)}
+.sess{display:flex;gap:8px;align-items:center;border-top:1px solid var(--line);padding:8px 0}
+.sess:first-child{border-top:none}
+.sess div{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sess button{font:inherit;font-size:13px;padding:6px 10px;border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--fg)}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<header>
+  <h1>QR File Transfer</h1>
+  <button class="tab" id="tabSend">送信</button>
+  <button class="tab" id="tabRecv">受信</button>
+</header>
+
+<main>
+<section id="paneSend" hidden>
+  <div class="card">
+    <label>ファイル</label>
+    <input type="file" id="sFile">
+    <div class="row">
+      <div><label>ブロック(byte)</label>
+        <select id="sBs"><option>400</option><option>700</option><option selected>1000</option><option>1400</option></select></div>
+      <div><label>FPS</label>
+        <select id="sFps"><option>5</option><option>8</option><option selected>10</option><option>15</option></select></div>
+      <div><label>誤り訂正</label>
+        <select id="sEcc"><option selected>L</option><option>M</option></select></div>
+    </div>
+    <div class="stats" id="sInfo"></div>
+    <button class="btn" id="sStart" disabled>表示開始</button>
+    <p class="muted">表示中は画面タップで停止。受信側が100%になるまで表示を続けてください。読み取りが不安定ならブロックを小さく、またはFPSを下げてください。</p>
+  </div>
+</section>
+
+<section id="paneRecv" hidden>
+  <div class="card">
+    <video id="rVideo" playsinline muted></video>
+    <div class="bar"><i id="rBar"></i></div>
+    <div class="stats">
+      <span>ファイル</span><b id="rName">—</b>
+      <span>復元ブロック</span><b id="rBlocks">—</b>
+      <span>有効受信</span><b id="rPkts">—</b>
+      <span>速度</span><b id="rRate">—</b>
+      <span>状態</span><b id="rState">停止中</b>
+    </div>
+    <button class="btn" id="rStart">カメラ開始</button>
+    <button class="btn" id="rSave" hidden>保存</button>
+    <button class="btn sub" id="rSaveNoMeta" hidden>ファイル名なしで保存</button>
+    <button class="btn sub" id="rReset">リセット（別ファイルを受信）</button>
+    <p class="muted" id="rDecoderInfo"></p>
+  </div>
+  <div class="card">
+    <b>保存中の受信データ</b>
+    <p class="muted">受信済みパケットは端末内に保存されます。同じファイルの表示を再度スキャンすると続きから受信します。</p>
+    <div id="rSessions"></div>
+  </div>
+</section>
+</main>
+
+<div id="stage"><canvas id="sCanvas"></canvas><div id="stageInfo"></div></div>
+
+<script id="app">
+// CORE-BEGIN
+const MAGIC = 0x51, T_DATA = 1, T_META = 2;
+
+const B45 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
+const B45MAP = {}; for (let i = 0; i < 45; i++) B45MAP[B45[i]] = i;
+function b45enc(b) {
+  let out = '';
+  let i = 0;
+  for (; i + 1 < b.length; i += 2) {
+    let n = b[i] * 256 + b[i + 1];
+    const c = n % 45; n = (n - c) / 45;
+    const d = n % 45; const e = (n - d) / 45;
+    out += B45[c] + B45[d] + B45[e];
+  }
+  if (i < b.length) { const n = b[i]; out += B45[n % 45] + B45[(n - n % 45) / 45]; }
+  return out;
+}
+function b45dec(s) {
+  const len = s.length, rem = len % 3;
+  if (rem === 1) return null;
+  const out = new Uint8Array(Math.floor(len / 3) * 2 + (rem ? 1 : 0));
+  let o = 0;
+  for (let i = 0; i < len; i += 3) {
+    const c = B45MAP[s[i]], d = B45MAP[s[i + 1]];
+    if (c === undefined || d === undefined) return null;
+    if (i + 2 < len) {
+      const e = B45MAP[s[i + 2]]; if (e === undefined) return null;
+      const n = c + d * 45 + e * 2025; if (n > 65535) return null;
+      out[o++] = n >> 8; out[o++] = n & 255;
+    } else {
+      const n = c + d * 45; if (n > 255) return null;
+      out[o++] = n;
+    }
+  }
+  return out;
+}
+
+const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC_T[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+
+function rng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0; let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// 送信は周期 C = K + E の繰り返し。周期内の先頭K個は元ブロックそのまま（系統パケット）、
+// 残りE個は乱数で選んだ複数ブロックのXOR（冗長パケット）。seedは単調増加で重複しない。
+function cycleLen(K) { return K + Math.max(8, Math.ceil(K * 0.5)); }
+function ltIndices(seed, K) {
+  const pos = seed % cycleLen(K);
+  if (pos < K) return [pos];
+  if (K === 1) return [0];
+  const d = K <= 512 ? Math.ceil(K / 2) : 256;
+  const r = rng(Math.imul(seed, 0x9E3779B1) ^ 0x85EBCA6B);
+  if (K <= 512) {
+    const a = Array.from({ length: K }, (_, i) => i);
+    for (let i = 0; i < d; i++) { const j = i + Math.floor(r() * (K - i)); const t = a[i]; a[i] = a[j]; a[j] = t; }
+    return a.slice(0, d);
+  }
+  const s = new Set();
+  while (s.size < d) s.add(Math.floor(r() * K));
+  return [...s];
+}
+
+function xorInto(dst, src) { for (let i = 0; i < dst.length; i++) dst[i] ^= src[i]; }
+
+// GF(2)上のガウス・ジョルダン消去。解が1列に確定した行だけ [列番号, データ] で返す
+function gauss(job) {
+  const n = job.n, W = (n + 31) >>> 5, word = job.bs % 4 === 0;
+  const M = job.rows.map(r => {
+    const b = new Uint32Array(W);
+    for (const c of r.cols) b[c >>> 5] |= 1 << (c & 31);
+    return { b, d: r.data, d32: word ? new Uint32Array(r.data.buffer, r.data.byteOffset, r.data.length >> 2) : null };
+  });
+  const xorRow = (a, p) => {
+    for (let w = 0; w < W; w++) a.b[w] ^= p.b[w];
+    if (word) { const x = a.d32, y = p.d32; for (let i = 0; i < x.length; i++) x[i] ^= y[i]; }
+    else xorInto(a.d, p.d);
+  };
+  const piv = new Array(n).fill(null);
+  let r0 = 0;
+  for (let c = 0; c < n && r0 < M.length; c++) {
+    const w = c >>> 5, bit = 1 << (c & 31);
+    let k = r0; while (k < M.length && !(M[k].b[w] & bit)) k++;
+    if (k === M.length) continue;
+    const t = M[r0]; M[r0] = M[k]; M[k] = t;
+    const pr = M[r0];
+    for (let r = 0; r < M.length; r++) if (r !== r0 && (M[r].b[w] & bit)) xorRow(M[r], pr);
+    piv[c] = pr; r0++;
+  }
+  const out = [];
+  for (let c = 0; c < n; c++) {
+    const p = piv[c]; if (!p) continue;
+    let ones = 0; for (let w = 0; w < W && ones < 2; w++) { let v = p.b[w]; while (v && ones < 2) { v &= v - 1; ones++; } }
+    if (ones === 1) out.push([c, p.d]);
+  }
+  return out;
+}
+
+class LTEncoder {
+  constructor(bytes, bs) {
+    this.bs = bs; this.size = bytes.length;
+    this.K = Math.ceil(this.size / bs);
+    this.src = new Uint8Array(this.K * bs); this.src.set(bytes);
+  }
+  block(seed) {
+    const out = new Uint8Array(this.bs);
+    for (const i of ltIndices(seed, this.K)) xorInto(out, this.src.subarray(i * this.bs, (i + 1) * this.bs));
+    return out;
+  }
+}
+
+class LTDecoder {
+  constructor(fileSize, bs) {
+    this.fileSize = fileSize; this.bs = bs;
+    this.K = Math.ceil(fileSize / bs);
+    this.blocks = new Array(this.K).fill(null);
+    this.done = 0; this.wait = new Map(); this.seen = new Set();
+    this.pend = []; this.sinceGE = 0; this.solving = false; this.asyncSolver = null; this.onChange = null; this.geStep = Math.max(5, Math.ceil(this.K * 0.01));
+  }
+  get complete() { return this.done === this.K; }
+  // returns true if the packet was new
+  add(seed, data) {
+    if (this.seen.has(seed)) return false;
+    this.seen.add(seed);
+    if (this.complete) return true;
+    const idx = ltIndices(seed, this.K);
+    const buf = new Uint8Array(data);
+    const rest = new Set();
+    for (const i of idx) { const b = this.blocks[i]; if (b) xorInto(buf, b); else rest.add(i); }
+    if (rest.size === 1) this._recover(rest.values().next().value, buf);
+    else if (rest.size > 1) {
+      const pkt = { rest, buf };
+      this.pend.push(pkt);
+      for (const i of rest) { let a = this.wait.get(i); if (!a) { a = []; this.wait.set(i, a); } a.push(pkt); }
+    }
+    // 受信数がKを超えても剥離復号が止まった場合、GF(2)上のガウス消去で残りを解く
+    if (!this.complete && ++this.sinceGE >= this.geStep && this.seen.size >= this.K) { this.sinceGE = 0; this.solve(); }
+    return true;
+  }
+  // 未知ブロックを列とする連立方程式を作り、同期（テスト・復元時）またはWorker（受信中）で解く
+  solve() {
+    if (this.solving) return;
+    const U = [], col = new Map();
+    for (let i = 0; i < this.K; i++) if (!this.blocks[i]) { col.set(i, U.length); U.push(i); }
+    this.pend = this.pend.filter(p => p.rest.size >= 2);
+    if (!U.length || this.pend.length < U.length) return;
+    const job = { n: U.length, bs: this.bs, rows: this.pend.map(p => ({ cols: Int32Array.from(p.rest, i => col.get(i)), data: p.buf.slice() })) };
+    const apply = res => { for (const [c, d] of res) this._recover(U[c], d); if (this.onChange) this.onChange(); };
+    if (this.asyncSolver) {
+      this.solving = true;
+      this.asyncSolver(job).then(res => { this.solving = false; apply(res); }, () => { this.solving = false; });
+    } else apply(gauss(job));
+  }
+  _recover(i, buf) {
+    const stack = [[i, buf]];
+    while (stack.length) {
+      const [j, b] = stack.pop();
+      if (this.blocks[j]) continue;
+      this.blocks[j] = b; this.done++;
+      const list = this.wait.get(j); if (!list) continue;
+      this.wait.delete(j);
+      for (const p of list) {
+        if (!p.rest.has(j)) continue;
+        xorInto(p.buf, b); p.rest.delete(j);
+        if (p.rest.size === 1) {
+          const k = p.rest.values().next().value; p.rest.delete(k);
+          if (!this.blocks[k]) stack.push([k, p.buf]);
+        }
+      }
+    }
+  }
+  assemble() {
+    const out = new Uint8Array(this.fileSize);
+    for (let i = 0; i < this.K; i++) out.set(this.blocks[i].subarray(0, Math.min(this.bs, this.fileSize - i * this.bs)), i * this.bs);
+    return out;
+  }
+}
+
+// Packet layout (big endian):
+// [0]=0x51 [1]=type [2..5]=fileId [6..9]=fileSize [10..11]=blockSize
+// DATA: [12..15]=seed [16..16+bs)=block
+// META: [12..43]=sha256 [44]=nameLen name [..]=mimeLen mime
+// last 4 bytes: crc32 of everything before
+function withCrc(p, len) { new DataView(p.buffer).setUint32(len, crc32(p.subarray(0, len))); return p; }
+function buildData(fileId, fileSize, bs, seed, block) {
+  const len = 16 + bs, p = new Uint8Array(len + 4), dv = new DataView(p.buffer);
+  p[0] = MAGIC; p[1] = T_DATA; dv.setUint32(2, fileId); dv.setUint32(6, fileSize); dv.setUint16(10, bs); dv.setUint32(12, seed);
+  p.set(block, 16);
+  return withCrc(p, len);
+}
+function buildMeta(fileId, fileSize, bs, hash, name, mime) {
+  const te = new TextEncoder();
+  let nb = te.encode(name);
+  while (nb.length > 180) { name = name.slice(0, -1); nb = te.encode(name); }
+  const mb = te.encode((mime || '').slice(0, 60));
+  const len = 46 + nb.length + mb.length, p = new Uint8Array(len + 4), dv = new DataView(p.buffer);
+  p[0] = MAGIC; p[1] = T_META; dv.setUint32(2, fileId); dv.setUint32(6, fileSize); dv.setUint16(10, bs);
+  p.set(hash, 12); p[44] = nb.length; p.set(nb, 45); p[45 + nb.length] = mb.length; p.set(mb, 46 + nb.length);
+  return withCrc(p, len);
+}
+function parsePacket(b) {
+  if (!b || b.length < 20 || b[0] !== MAGIC) return null;
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength), L = b.length - 4;
+  if (dv.getUint32(L) !== crc32(b.subarray(0, L))) return null;
+  const type = b[1], fileId = dv.getUint32(2), fileSize = dv.getUint32(6), bs = dv.getUint16(10);
+  if (!fileSize || !bs) return null;
+  if (type === T_DATA) {
+    if (L !== 16 + bs) return null;
+    return { type, fileId, fileSize, bs, seed: dv.getUint32(12), data: b.slice(16, L) };
+  }
+  if (type === T_META) {
+    if (L < 46) return null;
+    const td = new TextDecoder(), nl = b[44];
+    if (46 + nl > L) return null;
+    const ml = b[45 + nl];
+    if (46 + nl + ml !== L) return null;
+    return { type, fileId, fileSize, bs, hash: b.slice(12, 44), name: td.decode(b.subarray(45, 45 + nl)), mime: td.decode(b.subarray(46 + nl, 46 + nl + ml)) };
+  }
+  return null;
+}
+// CORE-END
+
+const $ = id => document.getElementById(id);
+const fmtBytes = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(2) + ' MB';
+const fmtTime = s => s < 60 ? Math.round(s) + '秒' : Math.floor(s / 60) + '分' + Math.round(s % 60) + '秒';
+const hex = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+async function sha256(bytes) { return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)); }
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && 'wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); }
+    if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch (e) {}
+}
+
+// ---------- tabs ----------
+function showTab(t) {
+  $('paneSend').hidden = t !== 'send'; $('paneRecv').hidden = t !== 'recv';
+  $('tabSend').classList.toggle('on', t === 'send'); $('tabRecv').classList.toggle('on', t === 'recv');
+  try { localStorage.setItem('qrft-tab', t); } catch (e) {}
+  if (t === 'recv') renderSessions();
+}
+$('tabSend').onclick = () => showTab('send');
+$('tabRecv').onclick = () => showTab('recv');
+{
+  let t = null; try { t = localStorage.getItem('qrft-tab'); } catch (e) {}
+  showTab(t || (/Android|iPhone|iPad/.test(navigator.userAgent) ? 'recv' : 'send'));
+}
+
+// ---------- sender ----------
+const S = { file: null, bytes: null, hash: null, enc: null, fileId: 0, timer: null, frame: 0, seed: 0 };
+async function prepareSend() {
+  const f = $('sFile').files[0];
+  $('sStart').disabled = true;
+  if (!f) { $('sInfo').innerHTML = ''; return; }
+  if (f.size === 0) { $('sInfo').innerHTML = '<span class="ng">空のファイルは送れません</span>'; return; }
+  $('sInfo').innerHTML = '<span>読み込み中…</span>';
+  S.file = f; S.bytes = new Uint8Array(await f.arrayBuffer()); S.hash = await sha256(S.bytes);
+  updateSendInfo(); $('sStart').disabled = false;
+}
+function updateSendInfo() {
+  if (!S.bytes) return;
+  const bs = +$('sBs').value, fps = +$('sFps').value, K = Math.ceil(S.bytes.length / bs);
+  const frames = Math.ceil(K * 1.05 * 1.1);
+  $('sInfo').innerHTML = `<span>サイズ</span><b>${fmtBytes(S.bytes.length)}</b><span>ブロック数</span><b>${K}</b><span>所要目安</span><b>${fmtTime(frames / fps)}〜</b><span>SHA-256</span><b>${hex(S.hash).slice(0, 12)}…</b>`;
+}
+$('sFile').onchange = prepareSend;
+['sBs', 'sFps'].forEach(id => $(id).onchange = updateSendInfo);
+
+const canvas = $('sCanvas'), ctx = canvas.getContext('2d');
+function drawQR(str, ecc) {
+  let qr = qrcode(0, ecc); qr.addData(str, 'Alphanumeric'); qr.make();
+  // jsQR（受信側の予備デコーダ）はバージョン23を読めないため24に上げる
+  if (qr.getModuleCount() === 17 + 4 * 23) { qr = qrcode(24, ecc); qr.addData(str, 'Alphanumeric'); qr.make(); }
+  const n = qr.getModuleCount(), q = 4, tot = n + 2 * q;
+  const dpr = window.devicePixelRatio || 1;
+  const avail = Math.min(window.innerWidth, window.innerHeight - 30) * dpr;
+  const s = Math.max(1, Math.floor(avail / tot));
+  canvas.width = canvas.height = tot * s;
+  canvas.style.width = canvas.style.height = (tot * s / dpr) + 'px';
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#000';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) ctx.fillRect((c + q) * s, (r + q) * s, s, s);
+  return n;
+}
+function startSend() {
+  const bs = +$('sBs').value, fps = +$('sFps').value, ecc = $('sEcc').value;
+  S.enc = new LTEncoder(S.bytes, bs);
+  // 同じファイル・同じブロックサイズなら同じIDになり、受信側は続きから再開できる
+  const fid = (new DataView(S.hash.buffer).getUint32(0) ^ bs) >>> 0;
+  if (fid !== S.fileId) { S.fileId = fid; S.seed = 0; }
+  const meta = b45enc(buildMeta(S.fileId, S.bytes.length, bs, S.hash, S.file.name, S.file.type));
+  S.frame = 0;
+  $('stage').style.display = 'flex';
+  const st = $('stage'); if (st.requestFullscreen) st.requestFullscreen().catch(() => {});
+  keepAwake(true);
+  const K = S.enc.K;
+  const tick = () => {
+    const isMeta = S.frame % 10 === 0;
+    let n;
+    try {
+      if (isMeta) n = drawQR(meta, ecc);
+      else { const seed = S.seed++; n = drawQR(b45enc(buildData(S.fileId, S.bytes.length, bs, seed, S.enc.block(seed))), ecc); }
+    } catch (e) { stopSend(); alert('QR生成に失敗しました。ブロックサイズを小さくしてください。\n' + e); return; }
+    S.frame++;
+    const C = cycleLen(K), pos = (S.seed - 1) % C, round = Math.floor((S.seed - 1) / C) + 1;
+    const phase = `${round}周目 ` + (pos < K ? `元データ ${pos + 1}/${K}` : `冗長 ${pos - K + 1}/${C - K}`);
+    $('stageInfo').textContent = `${phase} ・ ${n}×${n} ・ ${S.frame}フレーム ・ タップで停止`;
+  };
+  tick();
+  S.timer = setInterval(tick, 1000 / fps);
+}
+function stopSend() {
+  clearInterval(S.timer); S.timer = null;
+  $('stage').style.display = 'none';
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  keepAwake(false);
+}
+$('sStart').onclick = startSend;
+$('stage').onclick = stopSend;
+
+// ---------- storage (IndexedDB) ----------
+const DB = {
+  db: null,
+  async open() {
+    if (this.db) return this.db;
+    this.db = await new Promise((res, rej) => {
+      const r = indexedDB.open('qrft', 1);
+      r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('sessions', { keyPath: 'fileId' }); d.createObjectStore('pkts', { keyPath: ['fileId', 'seed'] }); };
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    return this.db;
+  },
+  async run(stores, mode, fn) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(stores, mode); let out;
+      Promise.resolve(fn(tx)).then(v => out = v);
+      tx.oncomplete = () => res(out); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+    });
+  },
+  req(r) { return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
+  range(id) { return IDBKeyRange.bound([id, 0], [id, Infinity]); },
+  putSession(s) { return this.run('sessions', 'readwrite', tx => { tx.objectStore('sessions').put(s); }); },
+  putPkts(arr) { return this.run('pkts', 'readwrite', tx => { const st = tx.objectStore('pkts'); for (const p of arr) st.put(p); }); },
+  sessions() { return this.run('sessions', 'readonly', tx => this.req(tx.objectStore('sessions').getAll())); },
+  pkts(id) { return this.run('pkts', 'readonly', tx => this.req(tx.objectStore('pkts').getAll(this.range(id)))); },
+  count(id) { return this.run('pkts', 'readonly', tx => this.req(tx.objectStore('pkts').count(this.range(id)))); },
+  del(id) { return this.run(['sessions', 'pkts'], 'readwrite', tx => { tx.objectStore('sessions').delete(id); tx.objectStore('pkts').delete(this.range(id)); }); }
+};
+
+// ---------- receiver ----------
+const R = { dec: null, fileId: null, meta: null, info: null, queue: [], scanning: false, stream: null, detector: null, lastRaw: '', t0: 0, newPkts: 0, result: null, otherWarned: false };
+const video = $('rVideo');
+const scanCanvas = document.createElement('canvas'), scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+
+function setState(t, cls) { $('rState').textContent = t; $('rState').className = cls || ''; }
+function updateRecvUI() {
+  const d = R.dec;
+  if (!d) { $('rBar').style.width = '0'; ['rName', 'rBlocks', 'rPkts', 'rRate'].forEach(id => $(id).textContent = '—'); return; }
+  $('rName').textContent = R.meta ? R.meta.name : '(未受信)';
+  $('rBlocks').textContent = `${d.done} / ${d.K} (${(d.done / d.K * 100).toFixed(1)}%)`;
+  $('rPkts').textContent = `${d.seen.size} / 目安 ${Math.ceil(d.K * 1.05)}`;
+  $('rBar').style.width = (d.done / d.K * 100) + '%';
+  const el = (performance.now() - R.t0) / 1000;
+  if (el > 1 && R.newPkts) {
+    const pps = R.newPkts / el, rate = pps * d.bs;
+    const remain = Math.max(0, d.K * 1.05 - d.seen.size) / pps;
+    $('rRate').textContent = `${fmtBytes(rate)}/s・残り約${fmtTime(remain)}`;
+  }
+}
+
+// 消去計算はWorkerで実行し、計算中もスキャンを止めない
+const solverWorker = (() => {
+  try {
+    const src = document.getElementById('app').text;
+    const core = src.slice(src.indexOf('// CORE-BEGIN'), src.indexOf('// CORE-END'));
+    const w = new Worker(URL.createObjectURL(new Blob([core + '\nonmessage = e => { const r = gauss(e.data.job); postMessage({ id: e.data.id, r }, r.map(x => x[1].buffer)); };'], { type: 'text/javascript' })));
+    let seq = 0; const waiting = new Map();
+    w.onmessage = e => { const f = waiting.get(e.data.id); waiting.delete(e.data.id); if (f) f.res(e.data.r); };
+    w.onerror = () => { for (const f of waiting.values()) f.rej(); waiting.clear(); };
+    return job => new Promise((res, rej) => { const id = ++seq; waiting.set(id, { res, rej }); w.postMessage({ id, job }, job.rows.map(r => r.data.buffer)); });
+  } catch (e) { return null; }
+})();
+function newDecoder(fileSize, bs) {
+  const d = new LTDecoder(fileSize, bs);
+  d.asyncSolver = solverWorker;
+  d.onChange = () => { if (R.dec === d) { updateRecvUI(); checkDone(); } };
+  return d;
+}
+
+async function beginSession(p) {
+  R.fileId = p.fileId; R.dec = newDecoder(p.fileSize, p.bs); R.t0 = performance.now(); R.newPkts = 0;
+  R.info = { fileId: p.fileId, fileSize: p.fileSize, bs: p.bs, name: null, mime: '', hash: null, updated: Date.now() };
+  try {
+    const old = (await DB.sessions()).find(s => s.fileId === p.fileId);
+    if (old && old.name) { R.info = old; R.meta = { name: old.name, mime: old.mime, hash: old.hash }; }
+    await DB.putSession(R.info);
+    const stored = await DB.pkts(p.fileId);
+    for (const s of stored) R.dec.add(s.seed, s.data);
+    if (stored.length) setState(`続きから再開（保存済み ${stored.length}件）`);
+  } catch (e) {}
+  checkDone();
+}
+
+function onPacket(p) {
+  if (R.fileId === null) { beginSession(p); }
+  else if (p.fileId !== R.fileId) {
+    if (!R.otherWarned) { R.otherWarned = true; setState('別ファイルの表示を検出。切り替えるならリセット', 'warn'); }
+    return;
+  }
+  if (p.type === T_META) {
+    if (!R.meta) {
+      R.meta = p;
+      Object.assign(R.info, { name: p.name, mime: p.mime, hash: p.hash, updated: Date.now() });
+      DB.putSession(R.info).catch(() => {});
+      checkDone();
+    }
+    return;
+  }
+  if (R.dec.add(p.seed, p.data)) {
+    R.newPkts++;
+    R.queue.push({ fileId: p.fileId, seed: p.seed, data: p.data });
+    checkDone();
+  }
+}
+
+function handleRaw(s) {
+  if (!s || s === R.lastRaw) return;
+  R.lastRaw = s;
+  const p = parsePacket(b45dec(s));
+  if (p) onPacket(p);
+}
+
+setInterval(() => {
+  if (R.queue.length) { const q = R.queue.splice(0); DB.putPkts(q).catch(() => {}); }
+  if (R.scanning) updateRecvUI();
+}, 700);
+
+async function checkDone() {
+  const d = R.dec;
+  if (!d || !d.complete || R.result || R.finishing) return;
+  if (!R.meta) { setState('データ復元済み・ファイル名を受信待ち', 'warn'); $('rSaveNoMeta').hidden = false; return; }
+  await finish(false);
+}
+async function finish(noMeta) {
+  const dec = R.dec;
+  if (!dec || !dec.complete || R.finishing) return;
+  R.finishing = true;
+  stopScan();
+  if (R.queue.length) { const q = R.queue.splice(0); await DB.putPkts(q).catch(() => {}); }
+  if (R.dec !== dec) return;
+  const bytes = dec.assemble();
+  let verdict = 'ハッシュ未確認', cls = 'warn';
+  if (!noMeta && R.meta) {
+    const h = await sha256(bytes);
+    if (hex(h) === hex(R.meta.hash)) { verdict = '完了・SHA-256一致'; cls = 'ok'; }
+    else { verdict = 'SHA-256不一致（データ破損）'; cls = 'ng'; }
+  }
+  if (R.dec !== dec) return;
+  R.result = { bytes, name: (R.meta && R.meta.name) || `received-${R.fileId.toString(16)}.bin`, mime: (R.meta && R.meta.mime) || 'application/octet-stream' };
+  setState(verdict, cls); updateRecvUI();
+  $('rSave').hidden = false; $('rSaveNoMeta').hidden = true;
+  if (navigator.vibrate) navigator.vibrate([100, 60, 100]);
+  renderSessions();
+}
+function download(res) {
+  const url = URL.createObjectURL(new Blob([res.bytes], { type: res.mime }));
+  const a = document.createElement('a'); a.href = url; a.download = res.name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+$('rSave').onclick = () => R.result && download(R.result);
+$('rSaveNoMeta').onclick = () => finish(true).then(() => R.result && download(R.result));
+
+async function startScan() {
+  if (R.scanning) { stopScan(); return; }
+  try {
+    R.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+  } catch (e) { setState('カメラを起動できません: ' + e.name, 'ng'); return; }
+  const track = R.stream.getVideoTracks()[0];
+  try { await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (e) {}
+  video.srcObject = R.stream; await video.play();
+  if (!R.detector && 'BarcodeDetector' in window) {
+    try { const f = await BarcodeDetector.getSupportedFormats(); if (f.includes('qr_code')) R.detector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) {}
+  }
+  $('rDecoderInfo').textContent = 'デコーダ: ' + (R.detector ? 'BarcodeDetector（ネイティブ）' : 'jsQR（JavaScript）') + ` ・ カメラ ${video.videoWidth}×${video.videoHeight}`;
+  R.scanning = true; $('rStart').textContent = 'カメラ停止';
+  if (!R.dec) setState('スキャン中'); else if (!R.result) setState('スキャン中（受信継続）');
+  if (R.dec) { R.t0 = performance.now(); R.newPkts = 0; }
+  keepAwake(true);
+  scanLoop();
+}
+function stopScan() {
+  R.scanning = false; $('rStart').textContent = 'カメラ開始';
+  if (R.stream) { R.stream.getTracks().forEach(t => t.stop()); R.stream = null; }
+  keepAwake(false);
+}
+async function scanLoop() {
+  if (!R.scanning) return;
+  try {
+    if (R.detector) {
+      const codes = await R.detector.detect(video);
+      for (const c of codes) handleRaw(c.rawValue);
+    } else if (window.jsQR && video.videoWidth) {
+      const vw = video.videoWidth, vh = video.videoHeight, side = Math.min(vw, vh);
+      const out = Math.min(side, 900);
+      scanCanvas.width = scanCanvas.height = out;
+      scanCtx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, out, out);
+      const img = scanCtx.getImageData(0, 0, out, out);
+      const r = jsQR(img.data, out, out, { inversionAttempts: 'dontInvert' });
+      if (r) handleRaw(r.data);
+    }
+  } catch (e) {}
+  if (!R.scanning) return;
+  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(scanLoop); else requestAnimationFrame(scanLoop);
+}
+$('rStart').onclick = startScan;
+$('rReset').onclick = () => {
+  stopScan();
+  if (R.queue.length) { const q = R.queue.splice(0); DB.putPkts(q).catch(() => {}); }
+  Object.assign(R, { dec: null, fileId: null, meta: null, info: null, lastRaw: '', result: null, finishing: false, otherWarned: false });
+  $('rSave').hidden = true; $('rSaveNoMeta').hidden = true; setState('停止中'); updateRecvUI(); renderSessions();
+};
+
+let renderSeq = 0;
+async function renderSessions() {
+  const box = $('rSessions'), my = ++renderSeq;
+  let list = [];
+  try { list = await DB.sessions(); } catch (e) { box.innerHTML = '<p class="muted">この環境では端末内保存を使えません</p>'; return; }
+  if (my !== renderSeq) return;
+  if (!list.length) { box.innerHTML = '<p class="muted">なし</p>'; return; }
+  list.sort((a, b) => b.updated - a.updated);
+  const frag = document.createDocumentFragment();
+  for (const s of list) {
+    const K = Math.ceil(s.fileSize / s.bs);
+    let n = 0; try { n = await DB.count(s.fileId); } catch (e) {}
+    const row = document.createElement('div'); row.className = 'sess';
+    const label = document.createElement('div');
+    label.textContent = `${s.name || '(名称未受信)'} ・ ${fmtBytes(s.fileSize)} ・ 受信${n}件（最低${K}件必要）`;
+    const b1 = document.createElement('button'); b1.textContent = '復元';
+    b1.onclick = () => rebuild(s);
+    const b2 = document.createElement('button'); b2.textContent = '削除';
+    b2.onclick = async () => { if (confirm('この受信データを削除しますか？')) { await DB.del(s.fileId).catch(() => {}); renderSessions(); } };
+    row.append(label, b1, b2); frag.append(row);
+  }
+  if (my === renderSeq) box.replaceChildren(frag);
+}
+async function rebuild(s) {
+  const dec = new LTDecoder(s.fileSize, s.bs);
+  for (const p of await DB.pkts(s.fileId)) dec.add(p.seed, p.data);
+  if (!dec.complete) { alert(`まだ不足しています（${dec.done}/${dec.K}ブロック）。送信側で同じファイルの表示を開始し、続きをスキャンしてください。\n※送信側のブロックサイズは前回と同じにしてください。`); return; }
+  const bytes = dec.assemble();
+  let note = '';
+  if (s.hash) note = hex(await sha256(bytes)) === hex(s.hash) ? '' : '\nSHA-256が一致しません。';
+  if (note) alert(note.trim());
+  download({ bytes, name: s.name || `received-${s.fileId.toString(16)}.bin`, mime: s.mime || 'application/octet-stream' });
+}
+</script>
+</body>
+</html>
