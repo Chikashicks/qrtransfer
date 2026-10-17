@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>QR File Transfer</title>
-<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1b1f24;--muted:#5f6b7a;--line:#dde1e6;--accent:#1f6feb;--ok:#1a7f37;--ng:#cf222e;--warn:#9a6700}
@@ -20,7 +19,7 @@ main{max-width:720px;margin:0 auto;padding:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px}
 label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
 select,input[type=file]{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
-.row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
 button.btn{font:inherit;padding:10px 16px;border-radius:8px;border:none;background:var(--accent);color:#fff;width:100%;margin-top:12px}
 button.btn.sub{background:transparent;color:var(--fg);border:1px solid var(--line)}
 button.btn:disabled{opacity:.4}
@@ -54,16 +53,18 @@ video{width:100%;border-radius:10px;background:#000;display:block}
     <label>ファイル</label>
     <input type="file" id="sFile">
     <div class="row">
+      <div><label>QR数/画面</label>
+        <select id="sQr"><option value="1">1</option><option value="2" selected>2</option><option value="4">4</option></select></div>
       <div><label>ブロック(byte)</label>
         <select id="sBs"><option>400</option><option>700</option><option selected>1000</option><option>1400</option></select></div>
       <div><label>FPS</label>
-        <select id="sFps"><option>5</option><option>8</option><option selected>10</option><option>15</option></select></div>
+        <select id="sFps"><option>6</option><option>10</option><option selected>12</option><option>15</option><option>20</option></select></div>
       <div><label>誤り訂正</label>
         <select id="sEcc"><option selected>L</option><option>M</option></select></div>
     </div>
     <div class="stats" id="sInfo"></div>
     <button class="btn" id="sStart" disabled>表示開始</button>
-    <p class="muted">表示中は画面タップで停止。受信側が100%になるまで表示を続けてください。読み取りが不安定ならブロックを小さく、またはFPSを下げてください。</p>
+    <p class="muted">表示中は画面タップで停止。受信側が100%になるまで表示を続けてください。読み取りが不安定なら、QR数・ブロック・FPSのどれかを下げてください。ファイルは送信前にブラウザ内で自動圧縮されます（効果がない形式はそのまま送信）。</p>
   </div>
 </section>
 
@@ -96,7 +97,15 @@ video{width:100%;border-radius:10px;background:#000;display:block}
 
 <script id="app">
 // CORE-BEGIN
-const MAGIC = 0x51, T_DATA = 1, T_META = 2;
+const MAGIC = 0x52, T_DATA = 1, T_META = 2, F_GZIP = 0x10;
+const LAYOUTS = [1, 2, 4];
+// 2バイト目: 下位4bit=種別, bit4=gzip圧縮, bit5-6=1画面あたりのQR数(0:1個, 1:2個, 2:4個)
+function typeFlags(gz, layout) { return (gz ? F_GZIP : 0) | (Math.max(0, LAYOUTS.indexOf(layout)) << 5); }
+
+// ブラウザ標準の CompressionStream / DecompressionStream で圧縮・解凍する
+async function pipeBytes(bytes, ts) { return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(ts)).arrayBuffer()); }
+function gzip(bytes) { return pipeBytes(bytes, new CompressionStream('gzip')); }
+function gunzip(bytes) { return pipeBytes(bytes, new DecompressionStream('gzip')); }
 
 const B45 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
 const B45MAP = {}; for (let i = 0; i < 45; i++) B45MAP[B45[i]] = i;
@@ -130,6 +139,180 @@ function b45dec(s) {
     }
   }
   return out;
+}
+
+// ---- QRエンコーダ（英数字モード・誤り訂正L/M専用。外部ライブラリより大幅に速い） ----
+const QR_ECC = { L: [-1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+                 M: [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28] };
+const QR_BLK = { L: [-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25],
+                 M: [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49] };
+const QR_ECL_BITS = { L: 1, M: 0 };
+const GF_EXP = new Uint8Array(512), GF_LOG = new Uint8Array(256);
+{ let x = 1; for (let i = 0; i < 255; i++) { GF_EXP[i] = x; GF_LOG[x] = i; x <<= 1; if (x & 256) x ^= 0x11D; } for (let i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255]; }
+const gfMul = (a, b) => a && b ? GF_EXP[GF_LOG[a] + GF_LOG[b]] : 0;
+const RS_GEN = {};
+function rsGen(deg) {
+  if (RS_GEN[deg]) return RS_GEN[deg];
+  const g = new Uint8Array(deg); g[deg - 1] = 1; let root = 1;
+  for (let i = 0; i < deg; i++) {
+    for (let j = 0; j < deg; j++) { g[j] = gfMul(g[j], root); if (j + 1 < deg) g[j] ^= g[j + 1]; }
+    root = gfMul(root, 2);
+  }
+  return RS_GEN[deg] = g;
+}
+function rsRemainder(data, deg) {
+  const g = rsGen(deg), r = new Uint8Array(deg);
+  for (const b of data) {
+    const f = b ^ r[0]; r.copyWithin(0, 1); r[deg - 1] = 0;
+    if (f) for (let i = 0; i < deg; i++) r[i] ^= gfMul(g[i], f);
+  }
+  return r;
+}
+function qrRawModules(v) {
+  let r = (16 * v + 128) * v + 64;
+  if (v >= 2) { const na = Math.floor(v / 7) + 2; r -= (25 * na - 10) * na - 55; if (v >= 7) r -= 36; }
+  return r;
+}
+function qrDataCodewords(v, ecl) { return Math.floor(qrRawModules(v) / 8) - QR_ECC[ecl][v] * QR_BLK[ecl][v]; }
+function qrAlignPos(v) {
+  if (v === 1) return [];
+  const na = Math.floor(v / 7) + 2, step = Math.floor((v * 8 + na * 3 + 5) / (na * 4 - 4)) * 2, size = v * 4 + 17, r = [6];
+  for (let pos = size - 7; r.length < na; pos -= step) r.splice(1, 0, pos);
+  return r;
+}
+// 英数字の文字列からQRを作る。戻り値 { size, version, mask, mod: Uint8Array(size*size, 1=黒) }
+function qrEncode(str, ecl = 'L', minVersion = 1, mask = -1) {
+  if (!QR_ECC[ecl]) throw new Error('unsupported ECC level ' + ecl);
+  const len = str.length;
+  let v = minVersion;
+  for (; ; v++) {
+    if (v > 40) throw new Error('data too long for QR');
+    const cc = v <= 9 ? 9 : v <= 26 ? 11 : 13;
+    if (4 + cc + Math.floor(len / 2) * 11 + (len % 2) * 6 <= qrDataCodewords(v, ecl) * 8) break;
+  }
+  if (v === 23) v = 24; // 受信側の予備デコーダ(jsQR)がバージョン23を読めないため
+  const cap = qrDataCodewords(v, ecl), cc = v <= 9 ? 9 : v <= 26 ? 11 : 13;
+  // データのビット列
+  const data = new Uint8Array(cap); let bitLen = 0;
+  const put = (val, n) => { for (let i = n - 1; i >= 0; i--, bitLen++) if ((val >>> i) & 1) data[bitLen >>> 3] |= 0x80 >>> (bitLen & 7); };
+  put(2, 4); put(len, cc);
+  for (let i = 0; i < len; i += 2) {
+    const a = B45MAP[str[i]];
+    if (a === undefined || (i + 1 < len && B45MAP[str[i + 1]] === undefined)) throw new Error('non-alphanumeric char');
+    if (i + 1 < len) put(a * 45 + B45MAP[str[i + 1]], 11); else put(a, 6);
+  }
+  put(0, Math.min(4, cap * 8 - bitLen));
+  bitLen = (bitLen + 7) & ~7;
+  for (let pad = 0xEC, i = bitLen >>> 3; i < cap; i++, pad ^= 0xEC ^ 0x11) data[i] = pad;
+  // 誤り訂正符号を付けてブロックを交互に並べる
+  const nb = QR_BLK[ecl][v], eccLen = QR_ECC[ecl][v], raw = Math.floor(qrRawModules(v) / 8);
+  const nShort = nb - raw % nb, shortLen = Math.floor(raw / nb), blocks = [];
+  for (let i = 0, k = 0; i < nb; i++) {
+    const dl = shortLen - eccLen + (i < nShort ? 0 : 1), dat = data.subarray(k, k + dl); k += dl;
+    const b = new Uint8Array(shortLen + 1);
+    if (i < nShort) { b.set(dat, 0); b.set(rsRemainder(dat, eccLen), dl + 1); } // 短いブロックは位置dlを詰め物にする
+    else { b.set(dat, 0); b.set(rsRemainder(dat, eccLen), dl); }
+    blocks.push(b);
+  }
+  const cw = new Uint8Array(raw); let ci = 0;
+  for (let i = 0; i <= shortLen; i++) for (let j = 0; j < nb; j++) if (i !== shortLen - eccLen || j >= nShort) cw[ci++] = blocks[j][i];
+  // 機能パターン
+  const size = v * 4 + 17, mod = new Uint8Array(size * size), fn = new Uint8Array(size * size);
+  const set = (x, y, d) => { mod[y * size + x] = d ? 1 : 0; fn[y * size + x] = 1; };
+  for (let i = 0; i < size; i++) { set(6, i, i % 2 === 0); set(i, 6, i % 2 === 0); }
+  for (const [cx, cy] of [[3, 3], [size - 4, 3], [3, size - 4]])
+    for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+      const x = cx + dx, y = cy + dy, d = Math.max(Math.abs(dx), Math.abs(dy));
+      if (x >= 0 && x < size && y >= 0 && y < size) set(x, y, d !== 2 && d !== 4);
+    }
+  const ap = qrAlignPos(v), na = ap.length;
+  for (let i = 0; i < na; i++) for (let j = 0; j < na; j++) {
+    if ((i === 0 && j === 0) || (i === 0 && j === na - 1) || (i === na - 1 && j === 0)) continue;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) set(ap[i] + dx, ap[j] + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+  }
+  const drawFormat = m => {
+    const d = (QR_ECL_BITS[ecl] << 3) | m; let r = d;
+    for (let i = 0; i < 10; i++) r = (r << 1) ^ ((r >>> 9) * 0x537);
+    const bits = ((d << 10) | r) ^ 0x5412, b = i => (bits >>> i) & 1;
+    for (let i = 0; i <= 5; i++) set(8, i, b(i));
+    set(8, 7, b(6)); set(8, 8, b(7)); set(7, 8, b(8));
+    for (let i = 9; i < 15; i++) set(14 - i, 8, b(i));
+    for (let i = 0; i < 8; i++) set(size - 1 - i, 8, b(i));
+    for (let i = 8; i < 15; i++) set(8, size - 15 + i, b(i));
+    set(8, size - 8, 1);
+  };
+  drawFormat(0);
+  if (v >= 7) {
+    let r = v; for (let i = 0; i < 12; i++) r = (r << 1) ^ ((r >>> 11) * 0x1F25);
+    const bits = (v << 12) | r;
+    for (let i = 0; i < 18; i++) { const bt = (bits >>> i) & 1, a = size - 11 + i % 3, b = Math.floor(i / 3); set(a, b, bt); set(b, a, bt); }
+  }
+  // データ配置（ジグザグ）
+  for (let right = size - 1, i = 0, total = raw * 8; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    const up = ((right + 1) & 2) === 0;
+    for (let vert = 0; vert < size; vert++) for (let j = 0; j < 2; j++) {
+      const x = right - j, y = up ? size - 1 - vert : vert, k = y * size + x;
+      if (!fn[k] && i < total) { mod[k] = (cw[i >>> 3] >>> (7 - (i & 7))) & 1; i++; }
+    }
+  }
+  const applyMask = (m, dst) => {
+    for (let y = 0, k = 0; y < size; y++) for (let x = 0; x < size; x++, k++) {
+      if (fn[k]) continue;
+      let inv;
+      switch (m) {
+        case 0: inv = (x + y) % 2 === 0; break;
+        case 1: inv = y % 2 === 0; break;
+        case 2: inv = x % 3 === 0; break;
+        case 3: inv = (x + y) % 3 === 0; break;
+        case 4: inv = (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0; break;
+        case 5: inv = x * y % 2 + x * y % 3 === 0; break;
+        case 6: inv = (x * y % 2 + x * y % 3) % 2 === 0; break;
+        default: inv = ((x + y) % 2 + x * y % 3) % 2 === 0;
+      }
+      if (inv) dst[k] ^= 1;
+    }
+  };
+  if (mask < 0) {
+    // 規格どおりの減点評価で8種類のマスクから選ぶ
+    let best = Infinity; const base = mod.slice();
+    for (let m = 0; m < 8; m++) {
+      mod.set(base); applyMask(m, mod); drawFormat(m);
+      const pen = qrPenalty(mod, size);
+      if (pen < best) { best = pen; mask = m; }
+    }
+    mod.set(base);
+  }
+  applyMask(mask, mod); drawFormat(mask);
+  return { size, version: v, mask, mod };
+}
+function qrPenalty(mod, size) {
+  let res = 0;
+  const hist = new Int32Array(7);
+  const addHist = (run) => { if (hist[0] === 0) run += size; hist.copyWithin(1, 0, 6); hist[0] = run; };
+  const count = () => { const n = hist[1], core = n > 0 && hist[2] === n && hist[3] === n * 3 && hist[4] === n && hist[5] === n;
+    return (core && hist[0] >= n * 4 && hist[6] >= n ? 1 : 0) + (core && hist[6] >= n * 4 && hist[0] >= n ? 1 : 0); };
+  for (let pass = 0; pass < 2; pass++) {
+    for (let a = 0; a < size; a++) {
+      let color = 0, run = 0; hist.fill(0);
+      for (let b = 0; b < size; b++) {
+        const c = pass === 0 ? mod[a * size + b] : mod[b * size + a];
+        if (c === color) { run++; if (run === 5) res += 3; else if (run > 5) res++; }
+        else { addHist(run); if (!color) res += count() * 40; color = c; run = 1; }
+      }
+      if (color) { addHist(run); run = 0; }
+      run += size; addHist(run); res += count() * 40;
+    }
+  }
+  let dark = 0;
+  for (let y = 0; y < size - 1; y++) for (let x = 0; x < size - 1; x++) {
+    const k = y * size + x, c = mod[k];
+    if (c === mod[k + 1] && c === mod[k + size] && c === mod[k + size + 1]) res += 3;
+  }
+  for (let i = 0; i < mod.length; i++) dark += mod[i];
+  const total = size * size;
+  res += (Math.ceil(Math.abs(dark * 20 - total * 10) / total) - 1) * 10;
+  return res;
 }
 
 const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
@@ -280,44 +463,45 @@ class LTDecoder {
 }
 
 // Packet layout (big endian):
-// [0]=0x51 [1]=type [2..5]=fileId [6..9]=fileSize [10..11]=blockSize
+// [0]=0x52 [1]=type|flags [2..5]=fileId [6..9]=送信バイト数(圧縮後) [10..11]=blockSize
 // DATA: [12..15]=seed [16..16+bs)=block
-// META: [12..43]=sha256 [44]=nameLen name [..]=mimeLen mime
+// META: [12..43]=元ファイルのsha256 [44..47]=元サイズ [48]=nameLen name [..]=mimeLen mime
 // last 4 bytes: crc32 of everything before
 function withCrc(p, len) { new DataView(p.buffer).setUint32(len, crc32(p.subarray(0, len))); return p; }
-function buildData(fileId, fileSize, bs, seed, block) {
+function buildData(fileId, fileSize, bs, seed, block, tf = 0) {
   const len = 16 + bs, p = new Uint8Array(len + 4), dv = new DataView(p.buffer);
-  p[0] = MAGIC; p[1] = T_DATA; dv.setUint32(2, fileId); dv.setUint32(6, fileSize); dv.setUint16(10, bs); dv.setUint32(12, seed);
+  p[0] = MAGIC; p[1] = T_DATA | tf; dv.setUint32(2, fileId); dv.setUint32(6, fileSize); dv.setUint16(10, bs); dv.setUint32(12, seed);
   p.set(block, 16);
   return withCrc(p, len);
 }
-function buildMeta(fileId, fileSize, bs, hash, name, mime) {
+function buildMeta(fileId, fileSize, bs, hash, origSize, name, mime, tf = 0) {
   const te = new TextEncoder();
   let nb = te.encode(name);
   while (nb.length > 180) { name = name.slice(0, -1); nb = te.encode(name); }
   const mb = te.encode((mime || '').slice(0, 60));
-  const len = 46 + nb.length + mb.length, p = new Uint8Array(len + 4), dv = new DataView(p.buffer);
-  p[0] = MAGIC; p[1] = T_META; dv.setUint32(2, fileId); dv.setUint32(6, fileSize); dv.setUint16(10, bs);
-  p.set(hash, 12); p[44] = nb.length; p.set(nb, 45); p[45 + nb.length] = mb.length; p.set(mb, 46 + nb.length);
+  const len = 50 + nb.length + mb.length, p = new Uint8Array(len + 4), dv = new DataView(p.buffer);
+  p[0] = MAGIC; p[1] = T_META | tf; dv.setUint32(2, fileId); dv.setUint32(6, fileSize); dv.setUint16(10, bs);
+  p.set(hash, 12); dv.setUint32(44, origSize); p[48] = nb.length; p.set(nb, 49); p[49 + nb.length] = mb.length; p.set(mb, 50 + nb.length);
   return withCrc(p, len);
 }
 function parsePacket(b) {
   if (!b || b.length < 20 || b[0] !== MAGIC) return null;
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength), L = b.length - 4;
   if (dv.getUint32(L) !== crc32(b.subarray(0, L))) return null;
-  const type = b[1], fileId = dv.getUint32(2), fileSize = dv.getUint32(6), bs = dv.getUint16(10);
+  const type = b[1] & 15, gz = !!(b[1] & F_GZIP), layout = LAYOUTS[(b[1] >> 5) & 3] || 1;
+  const fileId = dv.getUint32(2), fileSize = dv.getUint32(6), bs = dv.getUint16(10);
   if (!fileSize || !bs) return null;
   if (type === T_DATA) {
     if (L !== 16 + bs) return null;
-    return { type, fileId, fileSize, bs, seed: dv.getUint32(12), data: b.slice(16, L) };
+    return { type, gz, layout, fileId, fileSize, bs, seed: dv.getUint32(12), data: b.slice(16, L) };
   }
   if (type === T_META) {
-    if (L < 46) return null;
-    const td = new TextDecoder(), nl = b[44];
-    if (46 + nl > L) return null;
-    const ml = b[45 + nl];
-    if (46 + nl + ml !== L) return null;
-    return { type, fileId, fileSize, bs, hash: b.slice(12, 44), name: td.decode(b.subarray(45, 45 + nl)), mime: td.decode(b.subarray(46 + nl, 46 + nl + ml)) };
+    if (L < 50) return null;
+    const td = new TextDecoder(), nl = b[48];
+    if (50 + nl > L) return null;
+    const ml = b[49 + nl];
+    if (50 + nl + ml !== L) return null;
+    return { type, gz, layout, fileId, fileSize, bs, hash: b.slice(12, 44), origSize: dv.getUint32(44), name: td.decode(b.subarray(49, 49 + nl)), mime: td.decode(b.subarray(50 + nl, 50 + nl + ml)) };
   }
   return null;
 }
@@ -325,7 +509,7 @@ function parsePacket(b) {
 
 const $ = id => document.getElementById(id);
 const fmtBytes = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(2) + ' MB';
-const fmtTime = s => s < 60 ? Math.round(s) + '秒' : Math.floor(s / 60) + '分' + Math.round(s % 60) + '秒';
+const fmtTime = s => s < 1 ? '1秒未満' : s < 60 ? Math.round(s) + '秒' : Math.floor(s / 60) + '分' + Math.round(s % 60) + '秒';
 const hex = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('');
 async function sha256(bytes) { return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)); }
 let wakeLock = null;
@@ -351,74 +535,126 @@ $('tabRecv').onclick = () => showTab('recv');
 }
 
 // ---------- sender ----------
-const S = { file: null, bytes: null, hash: null, enc: null, fileId: 0, timer: null, frame: 0, seed: 0 };
+const META_EVERY = 50; // 50フレームに1回、1枠をファイル名などのメタ情報に使う
+const S = { file: null, orig: null, origHash: null, payload: null, payHash: null, gz: false, fileId: null, enc: null, bs: 0, n: 1, fps: 10, ecc: 'L', tf: 0, meta: '', seed: 0, frame: 0, modules: 0, running: false, ready: false, due: 0, statT: 0, statN: 0, actualFps: 0, prep: 0 };
+function gridFor(n, W, H) { return n === 1 ? [1, 1] : n === 2 ? (W >= H ? [2, 1] : [1, 2]) : [2, 2]; }
+function sendSettings() { return { bs: +$('sBs').value, n: +$('sQr').value, fps: +$('sFps').value, ecc: $('sEcc').value }; }
+
 async function prepareSend() {
-  const f = $('sFile').files[0];
-  $('sStart').disabled = true;
+  const f = $('sFile').files[0], my = ++S.prep;
+  $('sStart').disabled = true; S.payload = null;
   if (!f) { $('sInfo').innerHTML = ''; return; }
   if (f.size === 0) { $('sInfo').innerHTML = '<span class="ng">空のファイルは送れません</span>'; return; }
-  $('sInfo').innerHTML = '<span>読み込み中…</span>';
-  S.file = f; S.bytes = new Uint8Array(await f.arrayBuffer()); S.hash = await sha256(S.bytes);
+  $('sInfo').innerHTML = '<span>読み込み・圧縮中…</span>';
+  const orig = new Uint8Array(await f.arrayBuffer());
+  const origHash = await sha256(orig);
+  let payload = orig, gz = false;
+  if (typeof CompressionStream === 'function') {
+    try { const c = await gzip(orig); if (c.length < orig.length * 0.97) { payload = c; gz = true; } } catch (e) {}
+  }
+  const payHash = await sha256(payload);
+  if (my !== S.prep) return;
+  Object.assign(S, { file: f, orig, origHash, payload, payHash, gz, fileId: null, seed: 0 });
   updateSendInfo(); $('sStart').disabled = false;
 }
 function updateSendInfo() {
-  if (!S.bytes) return;
-  const bs = +$('sBs').value, fps = +$('sFps').value, K = Math.ceil(S.bytes.length / bs);
-  const frames = Math.ceil(K * 1.05 * 1.1);
-  $('sInfo').innerHTML = `<span>サイズ</span><b>${fmtBytes(S.bytes.length)}</b><span>ブロック数</span><b>${K}</b><span>所要目安</span><b>${fmtTime(frames / fps)}〜</b><span>SHA-256</span><b>${hex(S.hash).slice(0, 12)}…</b>`;
+  if (!S.payload) return;
+  const { bs, n, fps } = sendSettings(), K = Math.ceil(S.payload.length / bs);
+  const pktPerSec = fps * (n - 1 / META_EVERY);
+  const comp = S.gz ? `${fmtBytes(S.payload.length)}（元の${(S.payload.length / S.orig.length * 100).toFixed(0)}%）` : '効果なし・そのまま送信';
+  $('sInfo').innerHTML = `<span>元サイズ</span><b>${fmtBytes(S.orig.length)}</b><span>圧縮後</span><b>${comp}</b><span>ブロック数</span><b>${K}</b><span>所要目安</span><b>${fmtTime(Math.ceil(K * 1.05) / pktPerSec)}〜</b><span>SHA-256</span><b>${hex(S.origHash).slice(0, 12)}…</b>`;
 }
 $('sFile').onchange = prepareSend;
-['sBs', 'sFps'].forEach(id => $(id).onchange = updateSendInfo);
+['sBs', 'sFps', 'sQr'].forEach(id => $(id).onchange = updateSendInfo);
 
 const canvas = $('sCanvas'), ctx = canvas.getContext('2d');
-function drawQR(str, ecc) {
-  let qr = qrcode(0, ecc); qr.addData(str, 'Alphanumeric'); qr.make();
-  // jsQR（受信側の予備デコーダ）はバージョン23を読めないため24に上げる
-  if (qr.getModuleCount() === 17 + 4 * 23) { qr = qrcode(24, ecc); qr.addData(str, 'Alphanumeric'); qr.make(); }
-  const n = qr.getModuleCount(), q = 4, tot = n + 2 * q;
+const back = document.createElement('canvas'), bctx = back.getContext('2d');
+function fitCanvas() {
   const dpr = window.devicePixelRatio || 1;
-  const avail = Math.min(window.innerWidth, window.innerHeight - 30) * dpr;
-  const s = Math.max(1, Math.floor(avail / tot));
-  canvas.width = canvas.height = tot * s;
-  canvas.style.width = canvas.style.height = (tot * s / dpr) + 'px';
-  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#000';
-  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) ctx.fillRect((c + q) * s, (r + q) * s, s, s);
-  return n;
+  const W = Math.floor(window.innerWidth * dpr), H = Math.floor((window.innerHeight - 30) * dpr);
+  for (const c of [canvas, back]) { c.width = W; c.height = H; }
+  canvas.style.width = (W / dpr) + 'px'; canvas.style.height = (H / dpr) + 'px';
+}
+function prepareSession() {
+  const st = sendSettings();
+  const fid = (new DataView(S.payHash.buffer).getUint32(0) ^ st.bs) >>> 0;
+  if (fid !== S.fileId) { S.fileId = fid; S.seed = 0; } // 同じファイル・同じブロックなら続きのseedから送る
+  Object.assign(S, st);
+  S.enc = new LTEncoder(S.payload, S.bs);
+  S.tf = typeFlags(S.gz, S.n);
+  S.meta = b45enc(buildMeta(S.fileId, S.payload.length, S.bs, S.origHash, S.orig.length, S.file.name, S.file.type, S.tf));
+  S.frame = 0; // 開始直後のフレームにメタ情報を入れる
+  fitCanvas();
+}
+// 次に表示するフレームを裏のcanvasに描いておき、表示の瞬間は転写するだけにする
+function renderNext() {
+  const strs = [];
+  for (let i = 0; i < S.n; i++) {
+    if (i === 0 && S.frame % META_EVERY === 0) strs.push(S.meta);
+    else { const seed = S.seed++; strs.push(b45enc(buildData(S.fileId, S.payload.length, S.bs, seed, S.enc.block(seed), S.tf))); }
+  }
+  S.frame++;
+  const W = back.width, H = back.height, [cols, rows] = gridFor(S.n, W, H), cw = W / cols, ch = H / rows;
+  bctx.fillStyle = '#fff'; bctx.fillRect(0, 0, W, H); bctx.fillStyle = '#000';
+  let maxN = 0;
+  strs.forEach((str, i) => {
+    const qr = qrEncode(str, S.ecc), n = qr.size, m = qr.mod, tot = n + 8;
+    maxN = Math.max(maxN, n);
+    const s = Math.max(1, Math.floor(Math.min(cw, ch) / tot));
+    const x0 = Math.floor((i % cols) * cw + (cw - tot * s) / 2) + 4 * s;
+    const y0 = Math.floor(Math.floor(i / cols) * ch + (ch - tot * s) / 2) + 4 * s;
+    for (let r = 0; r < n; r++) {
+      let c = 0;
+      while (c < n) {
+        if (!m[r * n + c]) { c++; continue; }
+        let e = c + 1; while (e < n && m[r * n + e]) e++;
+        bctx.fillRect(x0 + c * s, y0 + r * s, (e - c) * s, s); c = e;
+      }
+    }
+  });
+  S.modules = maxN; S.ready = true;
+  return back;
+}
+function renderSafe() {
+  if (!S.running) return;
+  try { renderNext(); } catch (e) { stopSend(); alert('QR生成に失敗しました。ブロックサイズを小さくしてください。\n' + e); }
+}
+// 表示の切り替えは requestAnimationFrame（画面の描画周期）に合わせて行う
+function sendLoop(ts) {
+  if (!S.running) return;
+  const iv = 1000 / S.fps;
+  if (S.ready && ts >= S.due - 3) {
+    ctx.drawImage(back, 0, 0); S.ready = false;
+    S.due = S.due && ts - S.due < iv ? S.due + iv : ts + iv;
+    if (!S.statT) { S.statT = ts; S.statN = 0; }
+    else if (++S.statN && ts - S.statT >= 1000) { S.actualFps = S.statN * 1000 / (ts - S.statT); S.statT = ts; S.statN = 0; showStageInfo(); }
+    setTimeout(renderSafe, 0);
+  }
+  requestAnimationFrame(sendLoop);
+}
+function showStageInfo() {
+  const K = S.enc.K, C = cycleLen(K), last = Math.max(0, S.seed - 1), pos = last % C, round = Math.floor(last / C) + 1;
+  const phase = `${round}周目 ` + (pos < K ? `元データ ${pos + 1}/${K}` : `冗長 ${pos - K + 1}/${C - K}`);
+  const slow = S.actualFps && S.actualFps < S.fps * 0.9 ? '（QR生成が間に合っていません）' : '';
+  $('stageInfo').textContent = `${phase} ・ QR${S.n}個 ${S.modules}×${S.modules} ・ 実測 ${S.actualFps.toFixed(1)}/${S.fps}fps${slow} ・ タップで停止`;
 }
 function startSend() {
-  const bs = +$('sBs').value, fps = +$('sFps').value, ecc = $('sEcc').value;
-  S.enc = new LTEncoder(S.bytes, bs);
-  // 同じファイル・同じブロックサイズなら同じIDになり、受信側は続きから再開できる
-  const fid = (new DataView(S.hash.buffer).getUint32(0) ^ bs) >>> 0;
-  if (fid !== S.fileId) { S.fileId = fid; S.seed = 0; }
-  const meta = b45enc(buildMeta(S.fileId, S.bytes.length, bs, S.hash, S.file.name, S.file.type));
-  S.frame = 0;
+  prepareSession();
+  Object.assign(S, { running: true, ready: false, due: 0, statT: 0, statN: 0, actualFps: 0 });
+  renderSafe(); if (!S.running) return;
   $('stage').style.display = 'flex';
   const st = $('stage'); if (st.requestFullscreen) st.requestFullscreen().catch(() => {});
   keepAwake(true);
-  const K = S.enc.K;
-  const tick = () => {
-    const isMeta = S.frame % 10 === 0;
-    let n;
-    try {
-      if (isMeta) n = drawQR(meta, ecc);
-      else { const seed = S.seed++; n = drawQR(b45enc(buildData(S.fileId, S.bytes.length, bs, seed, S.enc.block(seed))), ecc); }
-    } catch (e) { stopSend(); alert('QR生成に失敗しました。ブロックサイズを小さくしてください。\n' + e); return; }
-    S.frame++;
-    const C = cycleLen(K), pos = (S.seed - 1) % C, round = Math.floor((S.seed - 1) / C) + 1;
-    const phase = `${round}周目 ` + (pos < K ? `元データ ${pos + 1}/${K}` : `冗長 ${pos - K + 1}/${C - K}`);
-    $('stageInfo').textContent = `${phase} ・ ${n}×${n} ・ ${S.frame}フレーム ・ タップで停止`;
-  };
-  tick();
-  S.timer = setInterval(tick, 1000 / fps);
+  showStageInfo();
+  requestAnimationFrame(sendLoop);
 }
 function stopSend() {
-  clearInterval(S.timer); S.timer = null;
+  S.running = false;
   $('stage').style.display = 'none';
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   keepAwake(false);
 }
+window.addEventListener('resize', () => { if (S.running) { fitCanvas(); S.ready = false; renderSafe(); } });
 $('sStart').onclick = startSend;
 $('stage').onclick = stopSend;
 
@@ -453,7 +689,7 @@ const DB = {
 };
 
 // ---------- receiver ----------
-const R = { dec: null, fileId: null, meta: null, info: null, queue: [], scanning: false, stream: null, detector: null, lastRaw: '', t0: 0, newPkts: 0, result: null, otherWarned: false };
+const R = { dec: null, fileId: null, meta: null, info: null, queue: [], scanning: false, stream: null, detector: null, recent: new Map(), layout: 0, probe: 0, gz: false, t0: 0, newPkts: 0, result: null, finishing: false, otherWarned: false };
 const video = $('rVideo');
 const scanCanvas = document.createElement('canvas'), scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -469,7 +705,8 @@ function updateRecvUI() {
   if (el > 1 && R.newPkts) {
     const pps = R.newPkts / el, rate = pps * d.bs;
     const remain = Math.max(0, d.K * 1.05 - d.seen.size) / pps;
-    $('rRate').textContent = `${fmtBytes(rate)}/s・残り約${fmtTime(remain)}`;
+    const orig = R.gz && R.meta && R.meta.origSize ? `（元データ換算 ${fmtBytes(rate * R.meta.origSize / d.fileSize)}/s）` : '';
+    $('rRate').textContent = `${fmtBytes(rate)}/s${orig}・残り約${fmtTime(remain)}`;
   }
 }
 
@@ -494,10 +731,11 @@ function newDecoder(fileSize, bs) {
 
 async function beginSession(p) {
   R.fileId = p.fileId; R.dec = newDecoder(p.fileSize, p.bs); R.t0 = performance.now(); R.newPkts = 0;
-  R.info = { fileId: p.fileId, fileSize: p.fileSize, bs: p.bs, name: null, mime: '', hash: null, updated: Date.now() };
+  R.gz = p.gz;
+  R.info = { fileId: p.fileId, fileSize: p.fileSize, bs: p.bs, gz: p.gz, origSize: null, name: null, mime: '', hash: null, updated: Date.now() };
   try {
     const old = (await DB.sessions()).find(s => s.fileId === p.fileId);
-    if (old && old.name) { R.info = old; R.meta = { name: old.name, mime: old.mime, hash: old.hash }; }
+    if (old && old.name && !R.meta) { R.info = old; R.meta = { name: old.name, mime: old.mime, hash: old.hash, origSize: old.origSize }; }
     await DB.putSession(R.info);
     const stored = await DB.pkts(p.fileId);
     for (const s of stored) R.dec.add(s.seed, s.data);
@@ -512,10 +750,11 @@ function onPacket(p) {
     if (!R.otherWarned) { R.otherWarned = true; setState('別ファイルの表示を検出。切り替えるならリセット', 'warn'); }
     return;
   }
+  R.layout = p.layout;
   if (p.type === T_META) {
     if (!R.meta) {
       R.meta = p;
-      Object.assign(R.info, { name: p.name, mime: p.mime, hash: p.hash, updated: Date.now() });
+      Object.assign(R.info, { name: p.name, mime: p.mime, hash: p.hash, origSize: p.origSize, gz: p.gz, updated: Date.now() });
       DB.putSession(R.info).catch(() => {});
       checkDone();
     }
@@ -529,8 +768,10 @@ function onPacket(p) {
 }
 
 function handleRaw(s) {
-  if (!s || s === R.lastRaw) return;
-  R.lastRaw = s;
+  // 同じQRは連続するカメラフレームで何度も写るので、直近の読み取り結果で重複を除く
+  if (!s || R.recent.has(s)) return;
+  R.recent.set(s, 1);
+  if (R.recent.size > 64) R.recent.delete(R.recent.keys().next().value);
   const p = parsePacket(b45dec(s));
   if (p) onPacket(p);
 }
@@ -553,7 +794,11 @@ async function finish(noMeta) {
   stopScan();
   if (R.queue.length) { const q = R.queue.splice(0); await DB.putPkts(q).catch(() => {}); }
   if (R.dec !== dec) return;
-  const bytes = dec.assemble();
+  let bytes = dec.assemble();
+  if (R.gz) {
+    try { bytes = await gunzip(bytes); }
+    catch (e) { if (R.dec === dec) { setState('解凍に失敗しました（データ破損）', 'ng'); R.finishing = false; } return; }
+  }
   let verdict = 'ハッシュ未確認', cls = 'warn';
   if (!noMeta && R.meta) {
     const h = await sha256(bytes);
@@ -599,22 +844,29 @@ function stopScan() {
   if (R.stream) { R.stream.getTracks().forEach(t => t.stop()); R.stream = null; }
   keepAwake(false);
 }
+// カメラ映像（またはcanvas）1枚からQRを読み取る
+async function decodeFrame(src, w, h) {
+  if (R.detector) {
+    for (const c of await R.detector.detect(src)) handleRaw(c.rawValue);
+    return;
+  }
+  if (!window.jsQR || !w) return;
+  // 予備デコーダ(jsQR)は1回に1個しか読めないので、送信側の並べ方に合わせて領域を分けて読む。
+  // 並べ方が未判明の間は1個・2個・4個を順に試す
+  const layout = R.layout || LAYOUTS[R.probe++ % LAYOUTS.length];
+  const [cols, rows] = gridFor(layout, w, h), cw = w / cols, ch = h / rows;
+  for (let i = 0; i < cols * rows; i++) {
+    const side = Math.min(cw, ch), x = (i % cols) * cw + (cw - side) / 2, y = Math.floor(i / cols) * ch + (ch - side) / 2;
+    const out = Math.round(Math.min(side, 900));
+    scanCanvas.width = scanCanvas.height = out;
+    scanCtx.drawImage(src, x, y, side, side, 0, 0, out, out);
+    const r = jsQR(scanCtx.getImageData(0, 0, out, out).data, out, out, { inversionAttempts: 'dontInvert' });
+    if (r) handleRaw(r.data);
+  }
+}
 async function scanLoop() {
   if (!R.scanning) return;
-  try {
-    if (R.detector) {
-      const codes = await R.detector.detect(video);
-      for (const c of codes) handleRaw(c.rawValue);
-    } else if (window.jsQR && video.videoWidth) {
-      const vw = video.videoWidth, vh = video.videoHeight, side = Math.min(vw, vh);
-      const out = Math.min(side, 900);
-      scanCanvas.width = scanCanvas.height = out;
-      scanCtx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, out, out);
-      const img = scanCtx.getImageData(0, 0, out, out);
-      const r = jsQR(img.data, out, out, { inversionAttempts: 'dontInvert' });
-      if (r) handleRaw(r.data);
-    }
-  } catch (e) {}
+  try { await decodeFrame(video, video.videoWidth, video.videoHeight); } catch (e) {}
   if (!R.scanning) return;
   if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(scanLoop); else requestAnimationFrame(scanLoop);
 }
@@ -622,7 +874,7 @@ $('rStart').onclick = startScan;
 $('rReset').onclick = () => {
   stopScan();
   if (R.queue.length) { const q = R.queue.splice(0); DB.putPkts(q).catch(() => {}); }
-  Object.assign(R, { dec: null, fileId: null, meta: null, info: null, lastRaw: '', result: null, finishing: false, otherWarned: false });
+  Object.assign(R, { dec: null, fileId: null, meta: null, info: null, recent: new Map(), layout: 0, gz: false, result: null, finishing: false, otherWarned: false });
   $('rSave').hidden = true; $('rSaveNoMeta').hidden = true; setState('停止中'); updateRecvUI(); renderSessions();
 };
 
@@ -640,7 +892,7 @@ async function renderSessions() {
     let n = 0; try { n = await DB.count(s.fileId); } catch (e) {}
     const row = document.createElement('div'); row.className = 'sess';
     const label = document.createElement('div');
-    label.textContent = `${s.name || '(名称未受信)'} ・ ${fmtBytes(s.fileSize)} ・ 受信${n}件（最低${K}件必要）`;
+    label.textContent = `${s.name || '(名称未受信)'} ・ ${fmtBytes(s.origSize || s.fileSize)} ・ 受信${n}件（最低${K}件必要）`;
     const b1 = document.createElement('button'); b1.textContent = '復元';
     b1.onclick = () => rebuild(s);
     const b2 = document.createElement('button'); b2.textContent = '削除';
@@ -653,7 +905,8 @@ async function rebuild(s) {
   const dec = new LTDecoder(s.fileSize, s.bs);
   for (const p of await DB.pkts(s.fileId)) dec.add(p.seed, p.data);
   if (!dec.complete) { alert(`まだ不足しています（${dec.done}/${dec.K}ブロック）。送信側で同じファイルの表示を開始し、続きをスキャンしてください。\n※送信側のブロックサイズは前回と同じにしてください。`); return; }
-  const bytes = dec.assemble();
+  let bytes = dec.assemble();
+  if (s.gz) { try { bytes = await gunzip(bytes); } catch (e) { alert('解凍に失敗しました（データ破損）'); return; } }
   let note = '';
   if (s.hash) note = hex(await sha256(bytes)) === hex(s.hash) ? '' : '\nSHA-256が一致しません。';
   if (note) alert(note.trim());
