@@ -52,3 +52,11 @@ for (const [size, bs, loss, late] of [[1e6, 1000, 0, 0], [1e6, 1000, 0.2, 0], [3
   console.log(`fountain size=${size} loss=${loss} late=${late}: ok (受信 ${(recv / e.K).toFixed(3)}×K)`);
 }
 })().catch(e => { console.error(e); process.exit(1); });
+
+// lab.html に埋め込んだ共通部分が index.html と一致しているか
+{
+  const lab = fs.readFileSync(path.join(__dirname, '..', 'lab.html'), 'utf8');
+  const labCore = lab.split('// CORE-BEGIN')[1].split('// CORE-END')[0];
+  assert.strictEqual(labCore, core, 'lab.html の CORE が index.html と一致しません');
+  console.log('lab.html core sync: ok');
+}
