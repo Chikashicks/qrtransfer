@@ -42,7 +42,7 @@ video{width:100%;border-radius:10px;background:#000;display:block}
 </head>
 <body>
 <header>
-  <h1>QR File Transfer</h1>
+  <h1>QR File Transfer <small class="muted" id="appVer"></small></h1>
   <button class="tab" id="tabSend">送信</button>
   <button class="tab" id="tabRecv">受信</button>
 </header>
@@ -77,6 +77,7 @@ video{width:100%;border-radius:10px;background:#000;display:block}
       <span>復元ブロック</span><b id="rBlocks">—</b>
       <span>有効受信</span><b id="rPkts">—</b>
       <span>速度</span><b id="rRate">—</b>
+      <span>読み取り</span><b id="rDiag">—</b>
       <span>状態</span><b id="rState">停止中</b>
     </div>
     <button class="btn" id="rStart">カメラ開始</button>
@@ -98,6 +99,8 @@ video{width:100%;border-radius:10px;background:#000;display:block}
 <script id="app">
 // CORE-BEGIN
 const MAGIC = 0x52, T_DATA = 1, T_META = 2, F_GZIP = 0x10;
+// パケット形式の版。送信側と受信側で一致している必要がある（画面右上に表示）
+const FORMAT_VERSION = { 0x51: 1, 0x52: 2 };
 const LAYOUTS = [1, 2, 4];
 // 2バイト目: 下位4bit=種別, bit4=gzip圧縮, bit5-6=1画面あたりのQR数(0:1個, 1:2個, 2:4個)
 function typeFlags(gz, layout) { return (gz ? F_GZIP : 0) | (Math.max(0, LAYOUTS.indexOf(layout)) << 5); }
@@ -508,6 +511,7 @@ function parsePacket(b) {
 // CORE-END
 
 const $ = id => document.getElementById(id);
+$('appVer').textContent = 'v' + FORMAT_VERSION[MAGIC];
 const fmtBytes = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(2) + ' MB';
 const fmtTime = s => s < 1 ? '1秒未満' : s < 60 ? Math.round(s) + '秒' : Math.floor(s / 60) + '分' + Math.round(s % 60) + '秒';
 const hex = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('');
@@ -689,7 +693,7 @@ const DB = {
 };
 
 // ---------- receiver ----------
-const R = { dec: null, fileId: null, meta: null, info: null, queue: [], scanning: false, stream: null, detector: null, recent: new Map(), layout: 0, probe: 0, gz: false, t0: 0, newPkts: 0, result: null, finishing: false, otherWarned: false };
+const R = { diag: { det: 0, uniq: 0, ok: 0, other: 0, bad: 0, otherVer: 0 }, dec: null, fileId: null, meta: null, info: null, queue: [], scanning: false, stream: null, detector: null, recent: new Map(), layout: 0, probe: 0, gz: false, t0: 0, newPkts: 0, result: null, finishing: false, otherWarned: false };
 const video = $('rVideo');
 const scanCanvas = document.createElement('canvas'), scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -730,16 +734,21 @@ function newDecoder(fileSize, bs) {
 }
 
 async function beginSession(p) {
-  R.fileId = p.fileId; R.dec = newDecoder(p.fileSize, p.bs); R.t0 = performance.now(); R.newPkts = 0;
+  const dec = newDecoder(p.fileSize, p.bs);
+  R.fileId = p.fileId; R.dec = dec; R.t0 = performance.now(); R.newPkts = 0;
   R.gz = p.gz;
   R.info = { fileId: p.fileId, fileSize: p.fileSize, bs: p.bs, gz: p.gz, origSize: null, name: null, mime: '', hash: null, updated: Date.now() };
   try {
     const old = (await DB.sessions()).find(s => s.fileId === p.fileId);
+    if (R.dec !== dec) return; // 待っている間にリセットされた
     if (old && old.name && !R.meta) { R.info = old; R.meta = { name: old.name, mime: old.mime, hash: old.hash, origSize: old.origSize }; }
     await DB.putSession(R.info);
     const stored = await DB.pkts(p.fileId);
-    for (const s of stored) R.dec.add(s.seed, s.data);
-    if (stored.length) setState(`続きから再開（保存済み ${stored.length}件）`);
+    if (R.dec !== dec) return;
+    // この画面で受信済みのものを除き、前回までに保存されていた分だけを数える
+    let added = 0;
+    for (const s of stored) if (dec.add(s.seed, s.data)) added++;
+    if (added && !R.result && !R.finishing) setState(`続きから再開（保存済み ${added}件）`);
   } catch (e) {}
   checkDone();
 }
@@ -768,17 +777,34 @@ function onPacket(p) {
 }
 
 function handleRaw(s) {
+  if (!s) return;
+  R.diag.det++;
   // 同じQRは連続するカメラフレームで何度も写るので、直近の読み取り結果で重複を除く
-  if (!s || R.recent.has(s)) return;
+  if (R.recent.has(s)) return;
   R.recent.set(s, 1);
   if (R.recent.size > 64) R.recent.delete(R.recent.keys().next().value);
-  const p = parsePacket(b45dec(s));
-  if (p) onPacket(p);
+  R.diag.uniq++;
+  const b = b45dec(s), p = parsePacket(b);
+  if (p) { R.diag.ok++; onPacket(p); return; }
+  // 読めたのに使えなかったQRの理由を分類して表示する
+  if (b && b.length >= 20 && FORMAT_VERSION[b[0]] && b[0] !== MAGIC) {
+    R.diag.other++; R.diag.otherVer = FORMAT_VERSION[b[0]];
+    if (!R.dec) setState(`送信側のページが別の版（v${R.diag.otherVer}）です。両方のページを再読み込みしてください`, 'ng');
+  } else if (b && b.length >= 20 && b[0] === MAGIC) R.diag.bad++;
+  else R.diag.other++;
+}
+function updateDiag() {
+  const d = R.diag;
+  let t = d.det ? `検出${d.det} ・ 新規${d.uniq} ・ 有効${d.ok}` : 'QR未検出';
+  if (d.otherVer) t += ` ・ 別の版${d.other}`;
+  else if (d.other) t += ` ・ 対象外${d.other}`;
+  if (d.bad) t += ` ・ 破損${d.bad}`;
+  $('rDiag').textContent = t;
 }
 
 setInterval(() => {
   if (R.queue.length) { const q = R.queue.splice(0); DB.putPkts(q).catch(() => {}); }
-  if (R.scanning) updateRecvUI();
+  if (R.scanning) { updateRecvUI(); updateDiag(); }
 }, 700);
 
 async function checkDone() {
@@ -874,8 +900,8 @@ $('rStart').onclick = startScan;
 $('rReset').onclick = () => {
   stopScan();
   if (R.queue.length) { const q = R.queue.splice(0); DB.putPkts(q).catch(() => {}); }
-  Object.assign(R, { dec: null, fileId: null, meta: null, info: null, recent: new Map(), layout: 0, gz: false, result: null, finishing: false, otherWarned: false });
-  $('rSave').hidden = true; $('rSaveNoMeta').hidden = true; setState('停止中'); updateRecvUI(); renderSessions();
+  Object.assign(R, { diag: { det: 0, uniq: 0, ok: 0, other: 0, bad: 0, otherVer: 0 }, dec: null, fileId: null, meta: null, info: null, recent: new Map(), layout: 0, gz: false, result: null, finishing: false, otherWarned: false });
+  $('rSave').hidden = true; $('rSaveNoMeta').hidden = true; setState('停止中'); updateRecvUI(); updateDiag(); renderSessions();
 };
 
 let renderSeq = 0;
