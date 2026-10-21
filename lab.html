@@ -37,7 +37,7 @@ video{width:100%;border-radius:10px;background:#000;display:block}
 </head>
 <body>
 <header>
-  <h1>転送方式の測定 <small class="muted">lab v1.1</small></h1>
+  <h1>転送方式の測定 <small class="muted">lab v1.2</small></h1>
   <button class="tab" id="tabSend">表示（PC）</button>
   <button class="tab" id="tabRecv">測定（スマホ）</button>
 </header>
@@ -646,6 +646,48 @@ function fitHomography(src, dst, sx, sy, dx, dy) {
   const h = Array.from({ length: 8 }, (_, i) => A[i][8] / A[i][i]);
   return (x, y) => { x /= sx; y /= sy; const w = h[6] * x + h[7] * y + 1; return [(h[0] * x + h[1] * y + h[2]) / w * dx, (h[3] * x + h[4] * y + h[5]) / w * dy]; };
 }
+// 3点以上の対応からアフィン変換（最小二乗）。四隅QRが3個しか見つからないときの概算用
+function fitAffine(src, dst) {
+  const A = [new Float64Array(4), new Float64Array(4), new Float64Array(4)], bu = [0, 0, 0], bv = [0, 0, 0];
+  const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let k = 0; k < src.length; k++) {
+    const r = [src[k][0], src[k][1], 1];
+    for (let i = 0; i < 3; i++) { for (let j = 0; j < 3; j++) M[i][j] += r[i] * r[j]; bu[i] += r[i] * dst[k][0]; bv[i] += r[i] * dst[k][1]; }
+  }
+  const solve = b => {
+    const m = M.map((row, i) => [...row, b[i]]);
+    for (let c = 0; c < 3; c++) {
+      let p = c; for (let r = c + 1; r < 3; r++) if (Math.abs(m[r][c]) > Math.abs(m[p][c])) p = r;
+      [m[c], m[p]] = [m[p], m[c]];
+      if (Math.abs(m[c][c]) < 1e-9) return null;
+      for (let r = 0; r < 3; r++) if (r !== c) { const f = m[r][c] / m[c][c]; for (let j = c; j < 4; j++) m[r][j] -= f * m[c][j]; }
+    }
+    return [m[0][3] / m[0][0], m[1][3] / m[1][1], m[2][3] / m[2][2]];
+  };
+  const a = solve(bu), b = solve(bv);
+  return a && b ? (x, y) => [a[0] * x + a[1] * y + a[2], b[0] * x + b[1] * y + b[2]] : null;
+}
+// QR読み取り機能が返す四隅の点の順番は「QR自身の左上から」とは限らない（画像の左上から、の実装がある）。
+// そこで順番に依存しないQRの中心で画面のおおよその位置を求め、各点がQRのどの角かを自分で判定する
+function orderCorners(list, L, w, h) {
+  const centerOf = pts => [pts.reduce((a, p) => a + p[0], 0) / pts.length, pts.reduce((a, p) => a + p[1], 0) / pts.length];
+  const sc = list.map(f => centerOf(cornerQRPoints(L, f.ci))), ic = list.map(f => centerOf(f.pts));
+  const H0 = list.length >= 4 ? fitHomography(sc, ic, L.W, L.H, w, h) : fitAffine(sc, ic);
+  if (!H0) return false;
+  const perms = [];
+  for (let s = 0; s < 4; s++) { perms.push([0, 1, 2, 3].map(i => (i + s) % 4)); perms.push([0, 1, 2, 3].map(i => (s - i + 4) % 4)); }
+  for (const f of list) {
+    const pred = cornerQRPoints(L, f.ci).map(([x, y]) => H0(x, y));
+    let best = Infinity, bp = perms[0];
+    for (const p of perms) {
+      let dd = 0;
+      for (let k = 0; k < 4; k++) { const q = f.pts[p[k]]; dd += (q[0] - pred[k][0]) ** 2 + (q[1] - pred[k][1]) ** 2; }
+      if (dd < best) { best = dd; bp = p; }
+    }
+    f.pts = bp.map(i => f.pts[i]);
+  }
+  return true;
+}
 function bilinear(d, w, h, x, y, out, o) {
   x -= 0.5; y -= 0.5;
   const x0 = Math.floor(x), y0 = Math.floor(y);
@@ -695,6 +737,7 @@ async function analyze(src, w, h) {
   const { frame, cfg: cfgIdx, fps, W, H } = list[0], cfg = CONFIGS[cfgIdx];
   if (!cfg) return null;
   const L = labLayout(W, H, cfg.cell), bits = bitsOf(cfg);
+  if (!orderCorners(list, L, w, h)) return null;
   const srcPts = [], dstPts = [];
   for (const f of list) { const sp = cornerQRPoints(L, f.ci); for (let k = 0; k < 4; k++) { srcPts.push(sp[k]); dstPts.push(f.pts[k]); } }
   const Hm = fitHomography(srcPts, dstPts, W, H, w, h);
@@ -703,7 +746,8 @@ async function analyze(src, w, h) {
   let res2 = 0;
   for (let k = 0; k < srcPts.length; k++) { const [u, v] = Hm(srcPts[k][0], srcPts[k][1]); res2 += (u - dstPts[k][0]) ** 2 + (v - dstPts[k][1]) ** 2; }
   const resid = Math.sqrt(res2 / srcPts.length);
-  if (resid > 4) { R.badGeom++; R.last = { msg: `四隅の位置が不整合（${resid.toFixed(1)}px）` }; return null; }
+  const [qa, qb] = [Hm(...cornerQRPoints(L, 0)[0]), Hm(...cornerQRPoints(L, 0)[1])], modCam = Math.hypot(qa[0] - qb[0], qa[1] - qb[1]) / 21;
+  if (resid > Math.max(4, 0.6 * modCam)) { R.badGeom++; R.last = { msg: `四隅の位置が不整合（${resid.toFixed(1)}px）` }; return null; }
   const d = (src === work ? wctx : src.getContext('2d', { willReadFrequently: true })).getImageData(0, 0, w, h).data;
   const n = L.cols * L.rows, mk = cellMask(L), truth = cellValues(frame, cfgIdx, n, bits);
   // 各マスの中心のカメラ座標と、その位置の色
@@ -856,7 +900,7 @@ $('rReset').onclick = () => { R.results.clear(); R.badGeom = 0; Object.assign(R.
 $('rCopy').onclick = async () => {
   const g = R.glob;
   const report = {
-    lab: 1.1, badGeom: R.badGeom, ua: navigator.userAgent, decoder: R.detector ? 'BarcodeDetector' : 'jsQR',
+    lab: 1.2, badGeom: R.badGeom, ua: navigator.userAgent, decoder: R.detector ? 'BarcodeDetector' : 'jsQR',
     camera: R.settings && { width: R.settings.width, height: R.settings.height, frameRate: R.settings.frameRate, measuredFps: +R.camFps.toFixed(1) }, cameraMax: R.caps,
     analyzed: g.analyzed, mixedPct: +pct(g.mixed, g.analyzed).toFixed(1), noAnchor: g.noAnchor,
     results: resultRows(),
