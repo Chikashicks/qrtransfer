@@ -37,7 +37,7 @@ video{width:100%;border-radius:10px;background:#000;display:block}
 </head>
 <body>
 <header>
-  <h1>転送方式の測定 <small class="muted">lab v1</small></h1>
+  <h1>転送方式の測定 <small class="muted">lab v1.1</small></h1>
   <button class="tab" id="tabSend">表示（PC）</button>
   <button class="tab" id="tabRecv">測定（スマホ）</button>
 </header>
@@ -54,7 +54,8 @@ video{width:100%;border-radius:10px;background:#000;display:block}
         <select id="sSet"><option value="all" selected>全部（白黒＋色）</option><option value="bw">白黒のみ</option><option value="rgb">色のみ</option></select></div>
     </div>
     <button class="btn" id="sStart">表示開始</button>
-    <p class="muted">表示中は画面タップで停止。全設定を一巡するのに「設定数×表示時間」かかります。スマホは画面全体が映る距離で、なるべく正面から固定してください。</p>
+    <p class="muted">表示中は画面タップで停止。全設定を一巡するのに「設定数×表示時間」かかります。</p>
+    <p class="muted">撮る側のスマホは<b>PC画面と同じ向き（横長の画面なら横持ち）</b>にし、画面全体がぎりぎり映る距離で、なるべく正面から固定してください。PC画面の明るさは最大にし、照明の映り込みを避けてください。</p>
   </div>
 </section>
 
@@ -72,7 +73,7 @@ video{width:100%;border-radius:10px;background:#000;display:block}
   </div>
   <div class="card">
     <b>結果</b>
-    <p class="muted">誤り率はマス単位（色はRGBの3ビットのうち1つでも違えば誤り）。「補正後」は領域ごとに位置を数画素ずらして合わせ直した値で、位置合わせを改良すれば到達できる目安です。</p>
+    <p class="muted">誤り率はマス単位（色はRGBの3ビットのうち1つでも違えば誤り）。「補正後」は領域ごとに位置を数画素ずらして合わせ直した値で、位置合わせを改良すれば到達できる目安です。「中央値」「良好フレーム（補正後1%未満の割合）」は、読めるフレームと読めないフレームが混ざっていないかを見るための値です。「最悪の区画」は画面を4×4に分けたうち誤りが最も多い区画で、映り込みや画面端の問題を示します。</p>
     <div class="scroll"><table class="tbl" id="rTable"></table></div>
     <button class="btn" id="rCopy">結果をコピー</button>
     <button class="btn sub" id="rReset">結果をリセット</button>
@@ -654,7 +655,7 @@ function bilinear(d, w, h, x, y, out, o) {
   return true;
 }
 
-const R = { scanning: false, stream: null, detector: null, busy: false, camFrames: 0, camT0: 0, camFps: 0, results: new Map(), glob: { analyzed: 0, mixed: 0, noAnchor: 0, procMs: 0 }, last: null, settings: null, caps: null };
+const R = { badGeom: 0, scanning: false, stream: null, detector: null, busy: false, camFrames: 0, camT0: 0, camFps: 0, results: new Map(), glob: { analyzed: 0, mixed: 0, noAnchor: 0, procMs: 0 }, last: null, settings: null, caps: null };
 const video = $('rVideo');
 const work = document.createElement('canvas'), wctx = work.getContext('2d', { willReadFrequently: true });
 const crop = document.createElement('canvas'), cctx = crop.getContext('2d', { willReadFrequently: true });
@@ -698,6 +699,11 @@ async function analyze(src, w, h) {
   for (const f of list) { const sp = cornerQRPoints(L, f.ci); for (let k = 0; k < 4; k++) { srcPts.push(sp[k]); dstPts.push(f.pts[k]); } }
   const Hm = fitHomography(srcPts, dstPts, W, H, w, h);
   if (!Hm) return null;
+  // 四隅の点が射影変換にきちんと乗っているか（取り違え・誤検出のフレームを除外する）
+  let res2 = 0;
+  for (let k = 0; k < srcPts.length; k++) { const [u, v] = Hm(srcPts[k][0], srcPts[k][1]); res2 += (u - dstPts[k][0]) ** 2 + (v - dstPts[k][1]) ** 2; }
+  const resid = Math.sqrt(res2 / srcPts.length);
+  if (resid > 4) { R.badGeom++; R.last = { msg: `四隅の位置が不整合（${resid.toFixed(1)}px）` }; return null; }
   const d = (src === work ? wctx : src.getContext('2d', { willReadFrequently: true })).getImageData(0, 0, w, h).data;
   const n = L.cols * L.rows, mk = cellMask(L), truth = cellValues(frame, cfgIdx, n, bits);
   // 各マスの中心のカメラ座標と、その位置の色
@@ -741,19 +747,22 @@ async function analyze(src, w, h) {
     }
     best[2 * gi] = bx; best[2 * gi + 1] = by; corrSum += Math.hypot(bx, by); corrN++;
   }
-  let errCorr = 0; const errCh = [0, 0, 0];
+  let errCorr = 0; const errCh = [0, 0, 0], regE = new Float64Array(REG * REG), regN = new Float64Array(REG * REG);
   for (let k = 0; k < n; k++) if (valid[k]) {
-    const gi = reg[k];
-    if (!bilinear(d, w, h, pos[2 * k] + best[2 * gi], pos[2 * k + 1] + best[2 * gi + 1], tmp, 0)) { errCorr++; continue; }
+    const gi = reg[k]; regN[gi]++;
+    if (!bilinear(d, w, h, pos[2 * k] + best[2 * gi], pos[2 * k + 1] + best[2 * gi + 1], tmp, 0)) { errCorr++; regE[gi]++; continue; }
     const v = classify(tmp, 0, gi), t = truth[k];
-    if (v !== t) errCorr++;
+    if (v !== t) { errCorr++; regE[gi]++; }
     if (bits === 3) for (let ch = 0; ch < 3; ch++) if (((v ^ t) >> ch) & 1) errCh[ch]++;
   }
   // ずらす量は一部のマスで決めるため、全体では補正前より悪くなることがある。その場合は補正なしを採用
   if (errCorr > errRaw) { errCorr = errRaw; for (let ch = 0; ch < 3; ch++) errCh[ch] = errChRaw[ch]; corrSum = 0; }
   const ms = performance.now() - t0;
   let st = R.results.get(cfgIdx);
-  if (!st) R.results.set(cfgIdx, st = { cfgIdx, frames: 0, cells: 0, errRaw: 0, errCorr: 0, errCh: [0, 0, 0], corr: 0, camCell: 0, ms: 0, frameSet: new Set(), fps, W, H });
+  if (!st) R.results.set(cfgIdx, st = { cfgIdx, frames: 0, cells: 0, errRaw: 0, errCorr: 0, errCh: [0, 0, 0], corr: 0, camCell: 0, ms: 0, frameSet: new Set(), fps, W, H,
+    perFrame: [], camList: [], regE: new Float64Array(REG * REG), regN: new Float64Array(REG * REG) });
+  st.perFrame.push(errCorr / total); st.camList.push(cellCam);
+  for (let i = 0; i < REG * REG; i++) { st.regE[i] += regE[i]; st.regN[i] += regN[i]; }
   st.frames++; st.cells += total; st.errRaw += errRaw; st.errCorr += errCorr; st.corr += corrN ? corrSum / corrN : 0;
   st.camCell += cellCam; st.ms += ms; st.fps = fps; st.W = W; st.H = H; st.frameSet.add(frame);
   for (let ch = 0; ch < 3; ch++) st.errCh[ch] += errCh[ch];
@@ -764,12 +773,17 @@ async function analyze(src, w, h) {
 
 const pct = (a, b) => b ? (a / b * 100) : NaN;
 const fmtPct = x => isNaN(x) ? '—' : x < 0.01 && x > 0 ? '<0.01%' : x.toFixed(2) + '%';
+const median = a => { if (!a.length) return NaN; const b = [...a].sort((x, y) => x - y), m = b.length >> 1; return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2; };
 function resultRows() {
   return [...R.results.values()].sort((a, b) => a.cfgIdx - b.cfgIdx).map(st => {
     const cfg = CONFIGS[st.cfgIdx], L = labLayout(st.W, st.H, cfg.cell), mk = cellMask(L);
     let cells = 0; for (let i = 0; i < mk.length; i++) if (!mk[i]) cells++;
+    const regPct = Array.from(st.regE, (e, i) => +pct(e, st.regN[i]).toFixed(2));
     return {
-      mode: cfg.mode, cellPx: cfg.cell, camPx: +(st.camCell / st.frames).toFixed(2), frames: st.frames,
+      mode: cfg.mode, cellPx: cfg.cell, camPx: +median(st.camList).toFixed(2), frames: st.frames,
+      // フレームごとの誤り率（補正後）の分布。良好=1%未満
+      medianErr: +(median(st.perFrame) * 100).toFixed(3), goodPct: +(st.perFrame.filter(e => e < 0.01).length / st.frames * 100).toFixed(1),
+      worstRegion: Math.max(...regPct), regionErr: regPct,
       errRaw: +pct(st.errRaw, st.cells).toFixed(4), errCorr: +pct(st.errCorr, st.cells).toFixed(4),
       errCh: cfg.mode === 'rgb' ? st.errCh.map(e => +pct(e, st.cells).toFixed(4)) : null,
       shiftPx: +(st.corr / st.frames).toFixed(2), rawKBperFrame: +(cells * bitsOf(cfg) / 8 / 1024).toFixed(1),
@@ -779,10 +793,10 @@ function resultRows() {
 }
 function renderTable() {
   const rows = resultRows();
-  const head = '<tr><th>方式</th><th>マス(画面px)</th><th>マス(カメラpx)</th><th>解析枚数</th><th>誤り率</th><th>補正後</th><th>R/G/B別</th><th>ずれpx</th><th>1枚の生データ</th></tr>';
+  const head = '<tr><th>方式</th><th>マス(画面px)</th><th>マス(カメラpx)</th><th>解析枚数</th><th>誤り率</th><th>補正後</th><th>中央値</th><th>良好フレーム</th><th>最悪の区画</th><th>R/G/B別</th><th>ずれpx</th><th>1枚の生データ</th></tr>';
+  const c = x => x < 1 ? 'ok' : x < 5 ? 'warn' : 'ng';
   $('rTable').innerHTML = head + rows.map(r => {
-    const cls = r.errCorr < 1 ? 'ok' : r.errCorr < 5 ? 'warn' : 'ng';
-    return `<tr><td>${r.mode === 'bw' ? '白黒' : '色(8)'}</td><td>${r.cellPx}</td><td>${r.camPx}</td><td>${r.frames}</td><td>${fmtPct(r.errRaw)}</td><td class="${cls}">${fmtPct(r.errCorr)}</td><td>${r.errCh ? r.errCh.map(fmtPct).join(' / ') : ''}</td><td>${r.shiftPx}</td><td>${r.rawKBperFrame}KB</td></tr>`;
+    return `<tr><td>${r.mode === 'bw' ? '白黒' : '色(8)'}</td><td>${r.cellPx}</td><td>${r.camPx}</td><td>${r.frames}</td><td>${fmtPct(r.errRaw)}</td><td class="${c(r.errCorr)}">${fmtPct(r.errCorr)}</td><td class="${c(r.medianErr)}">${fmtPct(r.medianErr)}</td><td>${r.goodPct}%</td><td class="${c(r.worstRegion)}">${fmtPct(r.worstRegion)}</td><td>${r.errCh ? r.errCh.map(fmtPct).join(' / ') : ''}</td><td>${r.shiftPx}</td><td>${r.rawKBperFrame}KB</td></tr>`;
   }).join('');
 }
 function renderLive() {
@@ -838,11 +852,11 @@ function stopScan() {
   renderLive();
 }
 $('rStart').onclick = startScan;
-$('rReset').onclick = () => { R.results.clear(); Object.assign(R.glob, { analyzed: 0, mixed: 0, noAnchor: 0, procMs: 0 }); renderTable(); renderLive(); };
+$('rReset').onclick = () => { R.results.clear(); R.badGeom = 0; Object.assign(R.glob, { analyzed: 0, mixed: 0, noAnchor: 0, procMs: 0 }); renderTable(); renderLive(); };
 $('rCopy').onclick = async () => {
   const g = R.glob;
   const report = {
-    lab: 1, ua: navigator.userAgent, decoder: R.detector ? 'BarcodeDetector' : 'jsQR',
+    lab: 1.1, badGeom: R.badGeom, ua: navigator.userAgent, decoder: R.detector ? 'BarcodeDetector' : 'jsQR',
     camera: R.settings && { width: R.settings.width, height: R.settings.height, frameRate: R.settings.frameRate, measuredFps: +R.camFps.toFixed(1) }, cameraMax: R.caps,
     analyzed: g.analyzed, mixedPct: +pct(g.mixed, g.analyzed).toFixed(1), noAnchor: g.noAnchor,
     results: resultRows(),
